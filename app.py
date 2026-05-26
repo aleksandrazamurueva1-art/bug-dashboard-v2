@@ -224,6 +224,9 @@ updated_at = pd.Timestamp.now().strftime("%d.%m.%Y %H:%M")
 sheet_date_str = f"📅 Данные на: **{sheet_date}**  · " if sheet_date else ""
 st.caption(f"{sheet_date_str}🔄 Последнее обновление: **{updated_at}**")
 
+with st.expander("🔧 Диагностика: колонки таблицы (временно)", expanded=True):
+    st.write("Колонки в данных:", list(df.columns))
+
 st.sidebar.header("Фильтры")
 
 DEFAULT_STATUSES = ["Беклог продукта", "Новый", "В Работе", "На исправление", "Принят к исправлению"]
@@ -319,7 +322,7 @@ prev_w_start, prev_w_end, cur_w_start, cur_w_end = get_week_bounds(today)
 critical_df = filtered[
     filtered["Приоритет"].astype(str)
     .str.contains("Блокирующий|Критичный|Critical|Blocker", case=False, na=False)
-]
+] if "Приоритет" in filtered.columns else filtered.iloc[0:0]
 
 new_cur_week = (
     df[

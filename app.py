@@ -151,6 +151,11 @@ def load_data() -> tuple:
     df["JustAI"] = df["Метки"].apply(extract_justai)
     df["PROD"] = df["Метки"].apply(extract_prod)
 
+    # Добавляем отсутствующие колонки как пустые — для совместимости с кодом дашборда
+    for _col in ["Приоритет", DATE_RESOLUTION_COL, DUE_DATE_COL, VERSION_COL, APPEALS_COL, "Обновлен"]:
+        if _col not in df.columns:
+            df[_col] = None
+
     for col in [DATE_CREATED_COL, "Обновлен", DATE_RESOLUTION_COL, DUE_DATE_COL]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
@@ -223,9 +228,6 @@ if df.empty:
 updated_at = pd.Timestamp.now().strftime("%d.%m.%Y %H:%M")
 sheet_date_str = f"📅 Данные на: **{sheet_date}**  · " if sheet_date else ""
 st.caption(f"{sheet_date_str}🔄 Последнее обновление: **{updated_at}**")
-
-with st.expander("🔧 Диагностика: колонки таблицы (временно)", expanded=True):
-    st.write("Колонки в данных:", list(df.columns))
 
 st.sidebar.header("Фильтры")
 

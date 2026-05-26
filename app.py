@@ -266,16 +266,36 @@ if assignee_filter:
 if version_filter and VERSION_COL in filtered.columns:
     filtered = filtered[filtered[VERSION_COL].isin(version_filter)]
 
+# df_for_dynamics — все статусы, но с учётом фильтра "Тип дефекта"
+# (нужен для графиков динамики, где важно видеть и закрытые баги)
+df_for_dynamics = df.copy()
+if business_filter:
+    df_for_dynamics = df_for_dynamics[df_for_dynamics["Бизнес-линия"].isin(business_filter)]
+if classification_filter:
+    df_for_dynamics = df_for_dynamics[df_for_dynamics["Классификация"].isin(classification_filter)]
+
 if defect_type_filter:
+    # применяем к filtered
     prod_mask = pd.Series([False] * len(filtered), index=filtered.index)
     if "PROD" in defect_type_filter:
-        prod_mask = prod_mask | (filtered["PROD"] == True)
+        prod_mask = prod_mask | filtered["PROD"].astype(bool)
     if "Дефект промсреды" in defect_type_filter:
         if "Тип запроса" in filtered.columns:
             prod_mask = prod_mask | (
                 filtered["Тип запроса"].astype(str).str.strip().str.lower() == "дефект промсреды"
             )
     filtered = filtered[prod_mask]
+
+    # применяем к df_for_dynamics
+    dyn_mask = pd.Series([False] * len(df_for_dynamics), index=df_for_dynamics.index)
+    if "PROD" in defect_type_filter:
+        dyn_mask = dyn_mask | df_for_dynamics["PROD"].astype(bool)
+    if "Дефект промсреды" in defect_type_filter:
+        if "Тип запроса" in df_for_dynamics.columns:
+            dyn_mask = dyn_mask | (
+                df_for_dynamics["Тип запроса"].astype(str).str.strip().str.lower() == "дефект промсреды"
+            )
+    df_for_dynamics = df_for_dynamics[dyn_mask]
 
 if DATE_CREATED_COL in filtered.columns and filtered[DATE_CREATED_COL].notna().any():
     min_date = filtered[DATE_CREATED_COL].min().date()
@@ -721,8 +741,8 @@ def make_jira_line(source_df, title, period_start, group):
     st.plotly_chart(fig, use_container_width=True)
 
 # Данные для двух графиков
-_internal_df = df[df["JustAI"] == False].copy()
-_justai_df   = df[df["JustAI"] == True].copy()
+_internal_df = df_for_dynamics[df_for_dynamics["JustAI"] == False].copy()
+_justai_df   = df_for_dynamics[df_for_dynamics["JustAI"] == True].copy()
 
 dyn_col1, dyn_col2 = st.columns(2)
 

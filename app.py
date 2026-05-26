@@ -113,6 +113,10 @@ def extract_justai(labels):
     return "justai" in str(labels).lower()
 
 
+def extract_prod(labels):
+    return "prod" in str(labels).lower()
+
+
 @st.cache_data(ttl=300)
 def load_data() -> tuple:
     import re as _re
@@ -145,6 +149,7 @@ def load_data() -> tuple:
     df["Бизнес-линия"] = df["Метки"].apply(extract_business_line)
     df["Классификация"] = df["Метки"].apply(extract_classification)
     df["JustAI"] = df["Метки"].apply(extract_justai)
+    df["PROD"] = df["Метки"].apply(extract_prod)
 
     for col in [DATE_CREATED_COL, "Обновлен", DATE_RESOLUTION_COL, DUE_DATE_COL]:
         if col in df.columns:
@@ -239,6 +244,12 @@ priority_filter = multiselect_filter("Приоритет", "Приоритет")
 assignee_filter = multiselect_filter("Исполнитель", "Исполнитель")
 version_filter = multiselect_filter("Версия", VERSION_COL)
 
+defect_type_filter = st.sidebar.multiselect(
+    "Тип дефекта",
+    options=["PROD", "Дефект промсреды"],
+    default=[],
+)
+
 filtered = df.copy()
 filtered = filtered[~filtered["Статус"].astype(str).isin(CLOSED_STATUSES)]
 
@@ -254,6 +265,17 @@ if assignee_filter:
     filtered = filtered[filtered["Исполнитель"].isin(assignee_filter)]
 if version_filter and VERSION_COL in filtered.columns:
     filtered = filtered[filtered[VERSION_COL].isin(version_filter)]
+
+if defect_type_filter:
+    prod_mask = pd.Series([False] * len(filtered), index=filtered.index)
+    if "PROD" in defect_type_filter:
+        prod_mask = prod_mask | (filtered["PROD"] == True)
+    if "Дефект промсреды" in defect_type_filter:
+        if "Тип запроса" in filtered.columns:
+            prod_mask = prod_mask | (
+                filtered["Тип запроса"].astype(str).str.strip().str.lower() == "дефект промсреды"
+            )
+    filtered = filtered[prod_mask]
 
 if DATE_CREATED_COL in filtered.columns and filtered[DATE_CREATED_COL].notna().any():
     min_date = filtered[DATE_CREATED_COL].min().date()

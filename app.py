@@ -1,0 +1,1145 @@
+from datetime import timedelta
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+
+st.set_page_config(
+    page_title="Панель управления ошибками",
+    layout="wide"
+)
+
+SHEET_ID = "1wuZd8RDcvv3Vbvyy7LIFk7se8Y_90hC27v_N0sdgQ7E"
+SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
+
+CLASSIFICATION_MAP = {
+    "Автоответы": ["АвтоОтветы", "Автоответы"],
+    "Коммерческое предложение": ["Коммерческое_предложение", "Коммерческое предложение"],
+    "Конфиг-файлы": ["Конфиг-файлы", "Конфиг_файлы"],
+    "Массовые рассылки": ["Массовые_рассылки", "Массовые рассылки"],
+    "Отправка / получение сообщений": [
+        "Отправка/получение_сообщений",
+        "Отправка / получение сообщений",
+    ],
+    "Отчеты": ["Отчеты", "Отчёты"],
+    "Пользовательский интерфейс": [
+        "Пользовательский_интерфейс",
+        "Пользовательский интерфейс",
+    ],
+    "Портфели / MDM": ["Портфели/MDM", "Портфели / MDM"],
+    "Счетчик": ["Счетчик", "Счётчик"],
+    "Уведомления / push": ["Уведомления/push", "Уведомления / push"],
+    "Файлы": ["Файлы"],
+    "Чаты": ["Чаты"],
+}
+
+CLOSED_STATUSES = ["Закрыт", "В релизе"]
+DATE_CREATED_COL = "Дата создания"
+DATE_RESOLUTION_COL = "Дата резолюции"
+DUE_DATE_COL = "Срок исполнения"
+VERSION_COL = "Исправить в версиях"
+APPEALS_COL = "Количество обращений"
+
+
+st.markdown(
+    """
+    <style>
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1500px;
+    }
+    div[data-testid="stMetric"] {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        padding: 18px;
+        border-radius: 16px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+    }
+    div[data-testid="stMetricLabel"] { font-size: 15px; color: #9da7b3; }
+    div[data-testid="stMetricValue"] { font-size: 30px; font-weight: 800; }
+    .insight-box {
+        background: linear-gradient(135deg, #161b22 0%, #1f2937 100%);
+        border: 1px solid #30363d;
+        border-radius: 18px;
+        padding: 20px 24px;
+        margin: 12px 0 24px 0;
+    }
+    .insight-title { font-size: 20px; font-weight: 800; margin-bottom: 10px; }
+    .insight-item { font-size: 16px; margin: 7px 0; color: #d1d5db; }
+    .section-title { font-size: 24px; font-weight: 800; margin: 28px 0 8px 0; border-top: 1px solid #30363d; padding-top: 20px; }
+    .week-box {
+        background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+        border: 1px solid #238636;
+        border-radius: 18px;
+        padding: 20px 24px;
+        margin: 12px 0 24px 0;
+    }
+    .week-title { font-size: 18px; font-weight: 800; margin-bottom: 12px; color: #3fb950; }
+    .week-item { font-size: 15px; margin: 5px 0; color: #d1d5db; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+def extract_classification(labels):
+    text = str(labels).lower()
+    found = []
+    for display_name, aliases in CLASSIFICATION_MAP.items():
+        for alias in aliases:
+            if alias.lower() in text:
+                found.append(display_name)
+                break
+    return ", ".join(found) if found else "Не указано"
+
+
+def extract_business_line(labels):
+    text = str(labels).lower()
+    has_kb = "кб" in text
+    has_rb = "рб" in text
+    has_obshee = "общее" in text
+    if has_obshee or (has_kb and has_rb):
+        return "Общее"
+    if has_kb:
+        return "КБ"
+    if has_rb:
+        return "РБ"
+    return "Не указано"
+
+
+def extract_justai(labels):
+    return "justai" in str(labels).lower()
+
+
+@st.cache_data(ttl=300)
+def load_data() -> tuple:
+    import re as _re
+    sheet_date = None
+    try:
+        import openpyxl
+        import io
+        import urllib.request
+        raw = urllib.request.urlopen(SHEET_URL).read()
+        wb = openpyxl.load_workbook(io.BytesIO(raw))
+        sheet_name = wb.sheetnames[0]
+        # Парсим дату из названия листа вида "... 2026-05-09T23_08_52+0300"
+        match = _re.search(r"(\d{4}-\d{2}-\d{2})T(\d{2})_(\d{2})", sheet_name)
+        if match:
+            sheet_date = f"{match.group(1)} {match.group(2)}:{match.group(3)}"
+    except Exception:
+        pass
+
+    try:
+        df = pd.read_excel(SHEET_URL, header=3)
+    except Exception as e:
+        st.error(f"Не удалось загрузить данные из Google Sheets: {e}")
+        return pd.DataFrame(), sheet_date
+
+    df.columns = [str(c).strip() for c in df.columns]
+
+    if "Метки" not in df.columns:
+        df["Метки"] = ""
+
+    df["Бизнес-линия"] = df["Метки"].apply(extract_business_line)
+    df["Классификация"] = df["Метки"].apply(extract_classification)
+    df["JustAI"] = df["Метки"].apply(extract_justai)
+
+    for col in [DATE_CREATED_COL, "Обновлен", DATE_RESOLUTION_COL, DUE_DATE_COL]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+
+    today = pd.Timestamp.today().normalize()
+
+    if DATE_CREATED_COL in df.columns:
+        df["Возраст бага, дней"] = (today - df[DATE_CREATED_COL]).dt.days
+    else:
+        df["Возраст бага, дней"] = None
+
+    if DUE_DATE_COL in df.columns and "Статус" in df.columns:
+        df["Просрочен"] = (
+            (df[DUE_DATE_COL] < today)
+            & (~df["Статус"].astype(str).isin(CLOSED_STATUSES))
+        )
+    else:
+        df["Просрочен"] = False
+
+    return df, sheet_date
+
+
+def bar_with_pct(data, x, y, title, orientation="v", height=390):
+    """Строит bar chart с подписями 'N (X%)' от общей суммы."""
+    total = data[y].sum() if orientation == "v" else data[x].sum()
+    if total == 0:
+        return None
+    if orientation == "v":
+        data = data.copy()
+        data["label"] = data[y].apply(lambda v: f"{v}<br>({v/total*100:.1f}%)")
+        fig = px.bar(data, x=x, y=y, text="label")
+        fig.update_traces(textposition="outside")
+    else:
+        data = data.copy()
+        data["label"] = data[x].apply(lambda v: f"{v} ({v/total*100:.1f}%)")
+        fig = px.bar(data, x=x, y=y, orientation="h", text="label")
+        fig.update_traces(textposition="outside")
+    fig.update_layout(
+        height=height,
+        margin=dict(l=10, r=60, t=30, b=10),
+        xaxis_title=None,
+        yaxis_title=None,
+        showlegend=False,
+        uniformtext_minsize=9,
+    )
+    return fig
+
+
+def get_week_bounds(today):
+    """Возвращает границы прошлой (пн-вс) и текущей (пн-сегодня) недели."""
+    weekday = today.weekday()  # 0=пн
+    current_week_start = today - timedelta(days=weekday)
+    prev_week_start = current_week_start - timedelta(days=7)
+    prev_week_end = current_week_start - timedelta(days=1)
+    return prev_week_start, prev_week_end, current_week_start, today
+
+
+# ── Заголовок ──────────────────────────────────────────────────────────────
+st.title("🐞 Панель управления ошибками")
+
+if st.sidebar.button("🔄 Обновить данные"):
+    st.cache_data.clear()
+
+df, sheet_date = load_data()
+
+if df.empty:
+    st.error("Нет данных. Проверьте доступ к Google Sheets.")
+    st.stop()
+
+updated_at = pd.Timestamp.now().strftime("%d.%m.%Y %H:%M")
+sheet_date_str = f"📅 Данные на: **{sheet_date}**  · " if sheet_date else ""
+st.caption(f"{sheet_date_str}🔄 Последнее обновление: **{updated_at}**")
+
+st.sidebar.header("Фильтры")
+
+DEFAULT_STATUSES = ["Беклог продукта", "Новый", "В Работе", "На исправление", "Принят к исправлению"]
+
+def multiselect_filter(label, column, default=None, source=None):
+    src = source if source is not None else df
+    if column not in src.columns:
+        return []
+    values = sorted([v for v in src[column].dropna().unique() if str(v) != "nan"])
+    pre = [v for v in (default or []) if v in values]
+    return st.sidebar.multiselect(label, values, default=pre)
+
+
+business_filter = multiselect_filter("Бизнес-линия", "Бизнес-линия")
+classification_filter = multiselect_filter("Классификация", "Классификация")
+status_filter = multiselect_filter("Статус", "Статус", default=DEFAULT_STATUSES)
+priority_filter = multiselect_filter("Приоритет", "Приоритет")
+assignee_filter = multiselect_filter("Исполнитель", "Исполнитель")
+version_filter = multiselect_filter("Версия", VERSION_COL)
+
+filtered = df.copy()
+filtered = filtered[~filtered["Статус"].astype(str).isin(CLOSED_STATUSES)]
+
+if business_filter:
+    filtered = filtered[filtered["Бизнес-линия"].isin(business_filter)]
+if classification_filter:
+    filtered = filtered[filtered["Классификация"].isin(classification_filter)]
+if status_filter:
+    filtered = filtered[filtered["Статус"].isin(status_filter)]
+if priority_filter:
+    filtered = filtered[filtered["Приоритет"].isin(priority_filter)]
+if assignee_filter:
+    filtered = filtered[filtered["Исполнитель"].isin(assignee_filter)]
+if version_filter and VERSION_COL in filtered.columns:
+    filtered = filtered[filtered[VERSION_COL].isin(version_filter)]
+
+if DATE_CREATED_COL in filtered.columns and filtered[DATE_CREATED_COL].notna().any():
+    min_date = filtered[DATE_CREATED_COL].min().date()
+    max_date = filtered[DATE_CREATED_COL].max().date()
+    date_range = st.sidebar.date_input(
+        "Дата создания",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date,
+    )
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+        filtered = filtered[
+            (filtered[DATE_CREATED_COL].dt.date >= start_date)
+            & (filtered[DATE_CREATED_COL].dt.date <= end_date)
+        ]
+
+today = pd.Timestamp.today().normalize()
+prev_w_start, prev_w_end, cur_w_start, cur_w_end = get_week_bounds(today)
+
+critical_df = filtered[
+    filtered["Приоритет"].astype(str)
+    .str.contains("Блокирующий|Критичный|Critical|Blocker", case=False, na=False)
+]
+
+new_cur_week = (
+    df[
+        (df[DATE_CREATED_COL] >= cur_w_start)
+        & (df[DATE_CREATED_COL] <= cur_w_end)
+    ]
+    if DATE_CREATED_COL in df.columns else df.iloc[0:0]
+)
+
+closed_cur_week = (
+    df[
+        (df[DATE_RESOLUTION_COL] >= cur_w_start)
+        & (df[DATE_RESOLUTION_COL] <= cur_w_end)
+        & (df["Статус"].astype(str).isin(CLOSED_STATUSES))
+    ]
+    if DATE_RESOLUTION_COL in df.columns else df.iloc[0:0]
+)
+
+avg_age = filtered["Возраст бага, дней"].mean()
+overdue_count = int(filtered["Просрочен"].sum()) if "Просрочен" in filtered.columns else 0
+
+top_priority = (
+    filtered["Приоритет"].value_counts().idxmax()
+    if "Приоритет" in filtered.columns and not filtered.empty else "—"
+)
+top_category = (
+    filtered["Классификация"].value_counts().idxmax()
+    if "Классификация" in filtered.columns and not filtered.empty else "—"
+)
+no_bl_count = len(filtered[filtered["Бизнес-линия"] == "Не указано"])
+no_bl_share = (no_bl_count / len(filtered) * 100) if len(filtered) else 0
+justai_count = int(filtered["JustAI"].sum())
+justai_share = (justai_count / len(filtered) * 100) if len(filtered) else 0
+
+# ── KPI ────────────────────────────────────────────────────────────────────
+k1, k2, k3, k4, k6 = st.columns(5)
+k1.metric("Открытые баги", len(filtered))
+k2.metric("Critical / Blocker", len(critical_df))
+k3.metric("Просроченные", overdue_count)
+k4.metric("JustAI (вендор)", f"{justai_count} ({justai_share:.0f}%)")
+k6.metric("Средний возраст", f"{avg_age:.0f} дн." if pd.notna(avg_age) else "—")
+
+st.markdown(
+    f"""
+    <div class="insight-box">
+        <div class="insight-title">Ключевые выводы</div>
+        <div class="insight-item">• Основной приоритет в активном backlog: <b>{top_priority}</b></div>
+        <div class="insight-item">• Самая частая категория дефектов: <b>{top_category}</b></div>
+        <div class="insight-item">• Дефекты без бизнес-линии: <b>{no_bl_count}</b> ({no_bl_share:.1f}%)</div>
+        <div class="insight-item">• Баги на стороне вендора (JustAI): <b>{justai_count}</b> ({justai_share:.1f}%)</div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# ── ИТОГИ НЕДЕЛЬ ───────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">📅 Итоги недель</div>', unsafe_allow_html=True)
+
+tab_prev, tab_cur = st.tabs([
+    f"Прошлая неделя ({prev_w_start.strftime('%d.%m')} – {prev_w_end.strftime('%d.%m')})",
+    f"Текущая неделя ({cur_w_start.strftime('%d.%m')} – {today.strftime('%d.%m')})",
+])
+
+for tab, w_start, w_end, label in [
+    (tab_prev, prev_w_start, prev_w_end, "прошлой"),
+    (tab_cur, cur_w_start, cur_w_end, "текущей"),
+]:
+    with tab:
+        w_new = (
+            df[
+                (df[DATE_CREATED_COL] >= w_start)
+                & (df[DATE_CREATED_COL] <= w_end + timedelta(days=1))
+            ]
+            if DATE_CREATED_COL in df.columns else df.iloc[0:0]
+        )
+        # Закрытые: баги у которых дата релиза из VERSION_COL попадает в диапазон недели
+        import re as _re_w
+        def _get_rel_date(text):
+            s = str(text).strip()
+            m = _re_w.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", s)
+            if m:
+                try:
+                    return pd.Timestamp(f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}")
+                except Exception:
+                    pass
+            m2 = _re_w.search(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2})\b", s)
+            if m2:
+                try:
+                    yr = int(m2.group(3))
+                    full_yr = 2000 + yr if yr < 50 else 1900 + yr
+                    return pd.Timestamp(f"{full_yr}-{m2.group(2).zfill(2)}-{m2.group(1).zfill(2)}")
+                except Exception:
+                    pass
+            return pd.NaT
+
+        if VERSION_COL in df.columns:
+            _df_rel = df.copy()
+            _df_rel["_rel_date"] = _df_rel[VERSION_COL].apply(_get_rel_date)
+            w_closed = _df_rel[
+                (_df_rel["_rel_date"] >= w_start)
+                & (_df_rel["_rel_date"] <= w_end + timedelta(days=1))
+                & (_df_rel["_rel_date"].notna())
+            ]
+        else:
+            w_closed = df.iloc[0:0]
+
+        def parse_appeals(frame):
+            col = APPEALS_COL
+            if col not in frame.columns:
+                return frame.assign(**{col: 0})
+            f = frame.copy()
+            f[col] = (
+                f[col].astype(str).str.strip()
+                .str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
+                .pipe(pd.to_numeric, errors="coerce").fillna(0).astype(int)
+            )
+            return f
+
+        w_new = parse_appeals(w_new)
+        w_closed = parse_appeals(w_closed)
+
+        w_new_with = w_new[w_new[APPEALS_COL] > 0]
+        w_closed_with = w_closed[w_closed[APPEALS_COL] > 0]
+
+        wk1, wk2 = st.columns(2)
+        with wk1:
+            st.markdown(f"""
+            <div style="background:#161b22;border-radius:12px;padding:1rem 1.25rem;border:1px solid #30363d;">
+                <div style="font-size:13px;color:#9da7b3;margin-bottom:4px;">Открыто за неделю</div>
+                <div style="font-size:28px;font-weight:500;color:#e6edf3;margin-bottom:12px;">{len(w_new)}</div>
+                <div style="height:1px;background:#30363d;margin-bottom:12px;"></div>
+                <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+                    <div>
+                        <div style="font-size:12px;color:#9da7b3;margin-bottom:4px;">из них с обращениями</div>
+                        <div style="font-size:20px;font-weight:500;color:#f85149;">{len(w_new_with)} дефекта</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:12px;color:#9da7b3;margin-bottom:4px;">всего обращений</div>
+                        <div style="font-size:20px;font-weight:500;color:#f85149;">{int(w_new_with[APPEALS_COL].sum()) if not w_new_with.empty else 0}</div>
+                    </div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+        with wk2:
+            st.markdown(f"""
+            <div style="background:#161b22;border-radius:12px;padding:1rem 1.25rem;border:1px solid #30363d;">
+                <div style="font-size:13px;color:#9da7b3;margin-bottom:4px;">Закрыто за неделю</div>
+                <div style="font-size:28px;font-weight:500;color:#e6edf3;margin-bottom:12px;">{len(w_closed)}</div>
+                <div style="height:1px;background:#30363d;margin-bottom:12px;"></div>
+                <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+                    <div>
+                        <div style="font-size:12px;color:#9da7b3;margin-bottom:4px;">из них с обращениями</div>
+                        <div style="font-size:20px;font-weight:500;color:#3fb950;">{len(w_closed_with)} дефекта</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:12px;color:#9da7b3;margin-bottom:4px;">всего обращений</div>
+                        <div style="font-size:20px;font-weight:500;color:#3fb950;">{int(w_closed_with[APPEALS_COL].sum()) if not w_closed_with.empty else 0}</div>
+                    </div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<div style='margin-top:1rem;'></div>", unsafe_allow_html=True)
+
+        if not w_new.empty or not w_closed.empty:
+
+            def make_bar(frame, group_col, color, orient="h", height=320, key_suffix=""):
+                f = frame.copy()
+                f[group_col] = f[group_col].fillna("Не указано").astype(str).replace("", "Не указано")
+                grp = f.groupby(group_col).size().reset_index(name="Количество")
+                grp = grp.sort_values("Количество", ascending=(orient == "h"))
+                total = grp["Количество"].sum()
+                grp["label"] = grp["Количество"].apply(
+                    lambda v: f"{v} ({v/total*100:.0f}%)" if total else str(v)
+                )
+                if orient == "h":
+                    fig = px.bar(grp, x="Количество", y=group_col, orientation="h",
+                                 text="label", color_discrete_sequence=[color])
+                else:
+                    fig = px.bar(grp, x=group_col, y="Количество",
+                                 text="label", color_discrete_sequence=[color])
+                fig.update_traces(textposition="outside")
+                fig.update_layout(
+                    height=height, margin=dict(l=10, r=80, t=10, b=10),
+                    xaxis_title=None, yaxis_title=None, showlegend=False,
+                )
+                return fig
+
+            # ── Категории: открытые (синие) + закрытые (зелёные) ──
+            wc1, wc2 = st.columns(2)
+            with wc1:
+                st.markdown("<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px;'>"
+                            "<div style='width:10px;height:10px;border-radius:50%;background:#f85149;'></div>"
+                            "<span style='font-size:15px;font-weight:500;'>Открытые — по категориям</span></div>",
+                            unsafe_allow_html=True)
+                if not w_new.empty:
+                    st.plotly_chart(make_bar(w_new, "Классификация", "#378ADD", orient="h",
+                                            key_suffix=f"open_cat_{label}"),
+                                    use_container_width=True, key=f"wk_open_cat_{label}")
+                else:
+                    st.info("Нет открытых багов.")
+
+            with wc2:
+                st.markdown("<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px;'>"
+                            "<div style='width:10px;height:10px;border-radius:50%;background:#238636;'></div>"
+                            "<span style='font-size:15px;font-weight:500;'>Закрытые — по категориям</span></div>",
+                            unsafe_allow_html=True)
+                if not w_closed.empty:
+                    st.plotly_chart(make_bar(w_closed, "Классификация", "#238636", orient="h",
+                                            key_suffix=f"closed_cat_{label}"),
+                                    use_container_width=True, key=f"wk_closed_cat_{label}")
+                else:
+                    st.info("Нет закрытых багов.")
+
+            # ── Приоритеты + Бизнес-линии ──
+            wp1, wp2 = st.columns(2)
+
+            with wp1:
+                st.markdown("<div style='font-size:15px;font-weight:500;margin-bottom:8px;'>По приоритетам</div>",
+                            unsafe_allow_html=True)
+                priority_order = ["Блокирующий", "Критичный", "Средний", "Важный", "Низкий", "Незначительный"]
+
+                pri_open = w_new["Приоритет"].fillna("Не указано").value_counts() if not w_new.empty and "Приоритет" in w_new.columns else pd.Series(dtype=int)
+                pri_closed = w_closed["Приоритет"].fillna("Не указано").value_counts() if not w_closed.empty and "Приоритет" in w_closed.columns else pd.Series(dtype=int)
+                all_pris = [p for p in priority_order if p in list(pri_open.index) + list(pri_closed.index)]
+
+                pri_colors = {"Блокирующий": "#e24b4a", "Критичный": "#ef9f27",
+                              "Средний": "#378add", "Важный": "#8957e5",
+                              "Низкий": "#888780", "Незначительный": "#b4b2a9"}
+
+                rows_open, rows_closed, rows_pri = [], [], []
+                for p in all_pris:
+                    rows_open.append(int(pri_open.get(p, 0)))
+                    rows_closed.append(int(pri_closed.get(p, 0)))
+                    rows_pri.append(p)
+
+                if rows_pri:
+                    pri_df = pd.DataFrame({
+                        "Приоритет": rows_pri * 2,
+                        "Количество": rows_open + rows_closed,
+                        "Тип": ["Открыто"] * len(rows_pri) + ["Закрыто"] * len(rows_pri),
+                    })
+                    fig = px.bar(
+                        pri_df, x="Приоритет", y="Количество", color="Тип",
+                        barmode="group", text="Количество",
+                        color_discrete_map={"Открыто": "#f85149", "Закрыто": "#238636"},
+                        category_orders={"Приоритет": rows_pri},
+                    )
+                    fig.update_traces(textposition="outside")
+                    fig.update_layout(
+                        height=320, margin=dict(l=10, r=10, t=10, b=10),
+                        xaxis_title=None, yaxis_title=None,
+                        legend=dict(orientation="h", yanchor="bottom", y=-0.35,
+                                    xanchor="center", x=0.5, font=dict(size=11)),
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key=f"wk_pri_{label}")
+                else:
+                    st.info("Нет данных по приоритетам.")
+
+            with wp2:
+                st.markdown("<div style='font-size:15px;font-weight:500;margin-bottom:8px;'>По бизнес-линиям</div>",
+                            unsafe_allow_html=True)
+                bl_open = w_new["Бизнес-линия"].fillna("Не указано").value_counts() if not w_new.empty and "Бизнес-линия" in w_new.columns else pd.Series(dtype=int)
+                bl_closed = w_closed["Бизнес-линия"].fillna("Не указано").value_counts() if not w_closed.empty and "Бизнес-линия" in w_closed.columns else pd.Series(dtype=int)
+                all_bls = list(dict.fromkeys(list(bl_open.index) + list(bl_closed.index)))
+
+                if all_bls:
+                    bl_df = pd.DataFrame({
+                        "Бизнес-линия": all_bls * 2,
+                        "Количество": [int(bl_open.get(b, 0)) for b in all_bls] +
+                                      [int(bl_closed.get(b, 0)) for b in all_bls],
+                        "Тип": ["Открыто"] * len(all_bls) + ["Закрыто"] * len(all_bls),
+                    })
+                    fig = px.bar(
+                        bl_df, x="Бизнес-линия", y="Количество", color="Тип",
+                        barmode="group", text="Количество",
+                        color_discrete_map={"Открыто": "#f85149", "Закрыто": "#238636"},
+                    )
+                    fig.update_traces(textposition="outside")
+                    fig.update_layout(
+                        height=320, margin=dict(l=10, r=10, t=10, b=10),
+                        xaxis_title=None, yaxis_title=None,
+                        legend=dict(orientation="h", yanchor="bottom", y=-0.35,
+                                    xanchor="center", x=0.5, font=dict(size=11)),
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key=f"wk_bl_{label}")
+                else:
+                    st.info("Нет данных по бизнес-линиям.")
+
+        else:
+            st.info(f"Нет данных за {label} неделю.")
+
+# ── ДИНАМИКА ───────────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">📈 Динамика качества</div>', unsafe_allow_html=True)
+
+# Фильтры периода и группировки
+dyn_ctrl1, dyn_ctrl2, dyn_ctrl3 = st.columns([2, 2, 4])
+with dyn_ctrl1:
+    dyn_period = st.radio(
+        "Период",
+        options=["3 мес", "6 мес", "12 мес", "Всё время"],
+        index=2,
+        horizontal=True,
+        key="dyn_period",
+    )
+with dyn_ctrl2:
+    dyn_group = st.radio(
+        "Группировка",
+        options=["По дням", "По неделям", "По месяцам"],
+        index=2,
+        horizontal=True,
+        key="dyn_group",
+    )
+
+# Вычисляем дату начала периода
+_today = pd.Timestamp.today().normalize()
+if dyn_period == "3 мес":
+    _period_start = _today - pd.DateOffset(months=3)
+elif dyn_period == "6 мес":
+    _period_start = _today - pd.DateOffset(months=6)
+elif dyn_period == "12 мес":
+    _period_start = _today - pd.DateOffset(months=12)
+else:
+    _period_start = None
+
+# Функция группировки дат
+def _group_date(series, group):
+    if group == "По дням":
+        return series.dt.normalize()
+    elif group == "По неделям":
+        return series.dt.to_period("W").dt.start_time
+    else:
+        return series.dt.to_period("M").dt.start_time
+
+# Функция строит Jira-style линейный график (созданные vs закрытые)
+def make_jira_line(source_df, title, period_start, group):
+    has_created = DATE_CREATED_COL in source_df.columns and source_df[DATE_CREATED_COL].notna().any()
+    has_closed = DATE_RESOLUTION_COL in source_df.columns
+
+    if not has_created:
+        st.info("Нет данных по дате создания.")
+        return
+
+    # --- Созданные ---
+    created = source_df.dropna(subset=[DATE_CREATED_COL]).copy()
+    if period_start:
+        created = created[created[DATE_CREATED_COL] >= period_start]
+    created["_period"] = _group_date(created[DATE_CREATED_COL], group)
+    created_grp = created.groupby("_period").size().reset_index(name="Созданные")
+
+    # --- Закрытые (берём из полного df, не из filtered) ---
+    closed_src = source_df.copy()
+    closed_src = closed_src[closed_src["Статус"].astype(str).isin(CLOSED_STATUSES)]
+    closed_src = closed_src.dropna(subset=[DATE_RESOLUTION_COL])
+    if period_start:
+        closed_src = closed_src[closed_src[DATE_RESOLUTION_COL] >= period_start]
+    if not closed_src.empty:
+        closed_src["_period"] = _group_date(closed_src[DATE_RESOLUTION_COL], group)
+        closed_grp = closed_src.groupby("_period").size().reset_index(name="Закрытые")
+    else:
+        closed_grp = pd.DataFrame(columns=["_period", "Закрытые"])
+
+    # --- Объединяем ---
+    merged = pd.merge(created_grp, closed_grp, on="_period", how="outer").sort_values("_period")
+    merged = merged.fillna(0)
+
+    if merged.empty:
+        st.info("Нет данных за выбранный период.")
+        return
+
+    # --- Строим линейный график ---
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+
+    # Заливка между линиями
+    fig.add_trace(go.Scatter(
+        x=pd.concat([merged["_period"], merged["_period"][::-1]]),
+        y=pd.concat([merged["Созданные"], merged["Закрытые"][::-1]]),
+        fill="toself",
+        fillcolor="rgba(248,81,73,0.08)",
+        line=dict(color="rgba(255,255,255,0)"),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=merged["_period"],
+        y=merged["Созданные"],
+        mode="lines+markers",
+        name="Созданные",
+        line=dict(color="#f85149", width=2),
+        marker=dict(size=6, color="#f85149"),
+        hovertemplate="%{x|%d.%m.%Y}<br>Созданные: <b>%{y}</b><extra></extra>",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=merged["_period"],
+        y=merged["Закрытые"],
+        mode="lines+markers",
+        name="Закрытые",
+        line=dict(color="#3fb950", width=2),
+        marker=dict(size=6, color="#3fb950"),
+        hovertemplate="%{x|%d.%m.%Y}<br>Закрытые: <b>%{y}</b><extra></extra>",
+    ))
+
+    fig.update_layout(
+        title=title,
+        height=400,
+        margin=dict(l=10, r=10, t=50, b=10),
+        xaxis_title=None,
+        yaxis_title="Количество",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
+        hovermode="x unified",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(gridcolor="#21262d"),
+        yaxis=dict(gridcolor="#21262d"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# Данные для двух графиков
+_internal_df = df[df["JustAI"] == False].copy()
+_justai_df   = df[df["JustAI"] == True].copy()
+
+dyn_col1, dyn_col2 = st.columns(2)
+
+with dyn_col1:
+    make_jira_line(_internal_df, "🔵 Внутренние баги: созданные vs закрытые", _period_start, dyn_group)
+
+with dyn_col2:
+    make_jira_line(_justai_df, "🤖 JustAI (вендор): созданные vs закрытые", _period_start, dyn_group)
+
+# ── СТРУКТУРА BACKLOG ───────────────────────────────────────────────────────
+st.markdown('<div class="section-title">🗂 Структура активного backlog</div>', unsafe_allow_html=True)
+
+col3, col4 = st.columns(2)
+
+with col3:
+    st.subheader("Баги по приоритетам")
+    priority = (
+        filtered.groupby("Приоритет").size()
+        .reset_index(name="Количество")
+        .sort_values("Количество", ascending=False)
+    )
+    fig = bar_with_pct(priority, "Приоритет", "Количество", "")
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+
+with col4:
+    st.subheader("Баги по бизнес-линиям")
+    business = (
+        filtered.groupby("Бизнес-линия").size()
+        .reset_index(name="Количество")
+        .sort_values("Количество", ascending=False)
+    )
+    fig = bar_with_pct(business, "Бизнес-линия", "Количество", "")
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+
+col5, col6 = st.columns(2)
+
+with col5:
+    st.subheader("Топ категорий дефектов")
+    classification = (
+        filtered.groupby("Классификация").size()
+        .reset_index(name="Количество")
+        .sort_values("Количество", ascending=True)
+        .tail(12)
+    )
+    fig = bar_with_pct(classification, "Количество", "Классификация", "", orientation="h", height=470)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+
+with col6:
+    st.subheader("Классификация × Бизнес-линия")
+    matrix = (
+        filtered.groupby(["Классификация", "Бизнес-линия"]).size()
+        .reset_index(name="Количество")
+    )
+    if not matrix.empty:
+        fig = px.density_heatmap(matrix, x="Бизнес-линия", y="Классификация", z="Количество", text_auto=True)
+        fig.update_layout(height=470, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=None, yaxis_title=None)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Нет данных для матрицы.")
+
+# ── JUSTAI ──────────────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">🤖 Баги на стороне вендора (JustAI)</div>', unsafe_allow_html=True)
+
+justai_df = filtered[filtered["JustAI"] == True]
+
+if justai_df.empty:
+    st.info("Нет активных багов с меткой JustAI.")
+else:
+    jc1, jc2 = st.columns(2)
+    jc3, jc4 = st.columns(2)
+
+    with jc1:
+        st.subheader("По бизнес-линиям")
+        jbl = (
+            justai_df.groupby("Бизнес-линия").size()
+            .reset_index(name="Количество")
+            .sort_values("Количество", ascending=False)
+        )
+        fig = bar_with_pct(jbl, "Бизнес-линия", "Количество", "")
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+
+    with jc2:
+        st.subheader("По категориям")
+        jcat = (
+            justai_df.groupby("Классификация").size()
+            .reset_index(name="Количество")
+            .sort_values("Количество", ascending=True)
+        )
+        fig = bar_with_pct(jcat, "Количество", "Классификация", "", orientation="h", height=390)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+
+    with jc3:
+        st.info("Динамика JustAI — см. раздел «Динамика качества» выше.")
+
+    with jc4:
+        pass
+
+# ── ВЛИЯНИЕ НА ПОЛЬЗОВАТЕЛЕЙ ────────────────────────────────────────────────
+st.markdown('<div class="section-title">🔥 Влияние дефектов на пользователей</div>', unsafe_allow_html=True)
+
+if APPEALS_COL not in filtered.columns:
+    st.info(f"Колонка «{APPEALS_COL}» не найдена в данных.")
+else:
+    impact_df = filtered.copy()
+    impact_df[APPEALS_COL] = (
+        impact_df[APPEALS_COL]
+        .astype(str)
+        .str.strip()
+        .str.replace(",", ".", regex=False)
+        .str.replace(" ", "", regex=False)
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    impact_df = impact_df[impact_df[APPEALS_COL] > 0]
+
+    if impact_df.empty:
+        st.info("Нет дефектов с заполненным полем обращений.")
+    else:
+        total_appeals = int(impact_df[APPEALS_COL].sum())
+        bugs_with_appeals = len(impact_df)
+        avg_appeals = total_appeals / bugs_with_appeals if bugs_with_appeals else 0
+        top_cat_appeals = (
+            impact_df.groupby("Классификация")[APPEALS_COL].sum().idxmax()
+            if not impact_df.empty else "—"
+        )
+
+        im1, im2, im3, im4 = st.columns(4)
+        im1.metric("Всего обращений", total_appeals)
+        im2.metric("Багов с обращениями", bugs_with_appeals)
+        im3.metric("Топ категория", top_cat_appeals)
+        im4.metric("Среднее на баг", f"{avg_appeals:.1f}")
+
+        ic1, ic2 = st.columns(2)
+
+        with ic1:
+            st.subheader("Обращения по бизнес-линиям")
+            bl_appeals = (
+                impact_df.groupby("Бизнес-линия")[APPEALS_COL].sum()
+                .reset_index()
+                .sort_values(APPEALS_COL, ascending=True)
+            )
+            total_bl = bl_appeals[APPEALS_COL].sum()
+            bl_appeals["label"] = bl_appeals[APPEALS_COL].apply(
+                lambda v: f"{v} ({v/total_bl*100:.1f}%)" if total_bl else str(v)
+            )
+            bl_color_map = {"КБ": "#378ADD", "РБ": "#1D9E75", "Общее": "#EF9F27", "Не указано": "#888780"}
+            fig = px.bar(
+                bl_appeals,
+                x=APPEALS_COL,
+                y="Бизнес-линия",
+                orientation="h",
+                text="label",
+                color="Бизнес-линия",
+                color_discrete_map=bl_color_map,
+            )
+            fig.update_traces(textposition="outside")
+            fig.update_layout(
+                height=420,
+                margin=dict(l=10, r=120, t=30, b=10),
+                xaxis_title="Обращений",
+                yaxis_title=None,
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with ic2:
+            st.subheader("Обращения по категориям")
+            cat_appeals = (
+                impact_df.groupby("Классификация")[APPEALS_COL].sum()
+                .reset_index()
+                .sort_values(APPEALS_COL, ascending=True)
+            )
+            total_cat = cat_appeals[APPEALS_COL].sum()
+            cat_appeals["label"] = cat_appeals[APPEALS_COL].apply(
+                lambda v: f"{v} ({v/total_cat*100:.1f}%)" if total_cat else str(v)
+            )
+            fig = px.bar(
+                cat_appeals,
+                x=APPEALS_COL,
+                y="Классификация",
+                orientation="h",
+                text="label",
+                color_discrete_sequence=["#378ADD"],
+            )
+            fig.update_traces(textposition="outside")
+            fig.update_layout(
+                height=420,
+                margin=dict(l=10, r=120, t=30, b=10),
+                xaxis_title="Обращений",
+                yaxis_title=None,
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Динамика открытия и закрытия багов с обращениями
+        id1, id2 = st.columns(2)
+
+        with id1:
+            st.subheader("Динамика открытия (с обращениями)")
+            if DATE_CREATED_COL in impact_df.columns and impact_df[DATE_CREATED_COL].notna().any():
+                open_dyn = (
+                    impact_df.dropna(subset=[DATE_CREATED_COL])
+                    .assign(week=lambda x: x[DATE_CREATED_COL].dt.to_period("W").dt.start_time)
+                    .groupby("week").agg(
+                        Багов=("Код", "count"),
+                        Обращений=(APPEALS_COL, "sum")
+                    )
+                    .reset_index()
+                )
+                fig = px.bar(
+                    open_dyn, x="week", y="Обращений",
+                    text="Обращений",
+                    color_discrete_sequence=["#f85149"],
+                    hover_data={"Багов": True},
+                )
+                fig.update_traces(textposition="outside")
+                fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=None, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Нет данных по дате создания.")
+
+        with id2:
+            st.subheader("Динамика закрытия (с обращениями)")
+            # Берём все закрытые баги с обращениями из полного df
+            impact_all = df.copy()
+            impact_all[APPEALS_COL] = (
+                impact_all[APPEALS_COL].astype(str).str.strip()
+                .str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
+                .pipe(pd.to_numeric, errors="coerce").fillna(0).astype(int)
+            )
+            impact_closed = impact_all[
+                (impact_all[APPEALS_COL] > 0)
+                & (impact_all["Статус"].astype(str).isin(CLOSED_STATUSES))
+            ]
+            if DATE_RESOLUTION_COL in impact_closed.columns and impact_closed[DATE_RESOLUTION_COL].notna().any():
+                close_dyn = (
+                    impact_closed.dropna(subset=[DATE_RESOLUTION_COL])
+                    .assign(week=lambda x: x[DATE_RESOLUTION_COL].dt.to_period("W").dt.start_time)
+                    .groupby("week").agg(
+                        Багов=("Код", "count"),
+                        Обращений=(APPEALS_COL, "sum")
+                    )
+                    .reset_index()
+                )
+                fig = px.bar(
+                    close_dyn, x="week", y="Обращений",
+                    text="Обращений",
+                    color_discrete_sequence=["#238636"],
+                    hover_data={"Багов": True},
+                )
+                fig.update_traces(textposition="outside")
+                fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=None, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Нет закрытых багов с обращениями.")
+
+        st.subheader("Топ дефектов по количеству обращений")
+        top_bugs = impact_df.sort_values(APPEALS_COL, ascending=False).head(20)
+        show_impact_cols = ["Тема", APPEALS_COL, "Приоритет", "Классификация", "Бизнес-линия"]
+        show_impact_cols = [c for c in show_impact_cols if c in top_bugs.columns]
+        st.dataframe(
+            top_bugs[show_impact_cols].reset_index(drop=True),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Тема": st.column_config.TextColumn("Название бага", width="large"),
+                APPEALS_COL: st.column_config.NumberColumn("Кол-во обращений", format="%d"),
+                "Приоритет": st.column_config.TextColumn("Приоритет"),
+                "Классификация": st.column_config.TextColumn("Категория"),
+                "Бизнес-линия": st.column_config.TextColumn("Бизнес-линия"),
+            },
+        )
+
+# ── ПЛАНЫ ПО РЕЛИЗАМ ────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">🚀 Планы исправления по релизам</div>', unsafe_allow_html=True)
+
+if VERSION_COL not in filtered.columns:
+    st.info(f"Колонка «{VERSION_COL}» не найдена в данных.")
+else:
+    import re as _re
+
+    def parse_release(text):
+        """Возвращает (дата или None, исходный текст)"""
+        s = str(text).strip()
+        if not s or s.lower() in ("nan", "none", ""):
+            return None, None
+        m = _re.search(r"(\d{2})\.(\d{2})\.(\d{4})", s)
+        if m:
+            try:
+                dt = pd.Timestamp(f"{m.group(3)}-{m.group(2)}-{m.group(1)}")
+                return dt, s
+            except Exception:
+                pass
+        return None, s
+
+    rel_df = df[df[VERSION_COL].notna()].copy()
+    rel_df["_rel_label"] = rel_df[VERSION_COL].astype(str).str.strip()
+    rel_df = rel_df[rel_df["_rel_label"].str.lower() != "nan"]
+
+    if rel_df.empty:
+        st.info("Нет дефектов с заполненным полем версии.")
+    else:
+        # Собираем уникальные релизы
+        releases = []
+        for label in rel_df["_rel_label"].unique():
+            dt, display = parse_release(label)
+            if display:
+                releases.append({"label": label, "display": display, "date": dt})
+
+        # Сортируем: сначала с датой по возрастанию, потом без даты
+        releases.sort(key=lambda r: (r["date"] is None, r["date"] or pd.Timestamp.max))
+
+        # Цвета шапок карточек
+        header_colors = [
+            ("#0c447c", "#85b7eb", "#e6f1fb"),
+            ("#27500a", "#97c459", "#eaf3de"),
+            ("#3c3489", "#afa9ec", "#eeedfe"),
+            ("#633806", "#ef9f27", "#faeeda"),
+            ("#791f1f", "#f09595", "#fcebeb"),
+        ]
+
+        priority_colors = {
+            "Блокирующий": "#e24b4a",
+            "Критичный":   "#ef9f27",
+            "Средний":     "#378add",
+            "Низкий":      "#888780",
+            "Незначительный": "#b4b2a9",
+        }
+        bl_styles = {
+            "КБ":         ("background:#e6f1fb;color:#0c447c;"),
+            "РБ":         ("background:#eaf3de;color:#27500a;"),
+            "Общее":      ("background:#faeeda;color:#633806;"),
+            "Не указано": ("background:#f1efe8;color:#5f5e5a;"),
+        }
+
+        cols = st.columns(min(len(releases), 3))
+
+        for idx, rel in enumerate(releases):
+            col = cols[idx % 3]
+            bg, sub_c, title_c = header_colors[idx % len(header_colors)]
+
+            r_bugs = rel_df[rel_df["_rel_label"] == rel["label"]]
+
+            # Обращения
+            if APPEALS_COL in r_bugs.columns:
+                appeals_vals = (
+                    r_bugs[APPEALS_COL].astype(str).str.strip()
+                    .str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
+                    .pipe(pd.to_numeric, errors="coerce").fillna(0)
+                )
+                total_appeals = int(appeals_vals.sum())
+            else:
+                total_appeals = 0
+
+            total_bugs = len(r_bugs)
+
+            # Приоритеты
+            pri_counts = r_bugs["Приоритет"].value_counts() if "Приоритет" in r_bugs.columns else pd.Series(dtype=int)
+            pri_max = pri_counts.max() if not pri_counts.empty else 1
+
+            pri_html = ""
+            for pri_name in ["Блокирующий", "Критичный", "Средний", "Низкий", "Незначительный"]:
+                cnt = int(pri_counts.get(pri_name, 0))
+                if cnt == 0:
+                    continue
+                pct = int(cnt / pri_max * 100)
+                clr = priority_colors.get(pri_name, "#888780")
+                pri_html += f"""
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+                  <span style="font-size:11px;color:#9da7b3;width:90px;flex-shrink:0;">{pri_name}</span>
+                  <div style="flex:1;height:10px;background:#21262d;border-radius:4px;overflow:hidden;">
+                    <div style="width:{pct}%;height:100%;background:{clr};border-radius:4px;"></div>
+                  </div>
+                  <span style="font-size:11px;color:#9da7b3;width:18px;text-align:right;">{cnt}</span>
+                </div>"""
+
+            # Бизнес-линии
+            bl_counts = r_bugs["Бизнес-линия"].value_counts() if "Бизнес-линия" in r_bugs.columns else pd.Series(dtype=int)
+            bl_html = ""
+            for bl_name, cnt in bl_counts.items():
+                sty = bl_styles.get(bl_name, "background:#f1efe8;color:#5f5e5a;")
+                bl_html += f'<span style="{sty}font-size:11px;padding:3px 8px;border-radius:6px;">{bl_name}: {cnt}</span>'
+
+            # Топ категорий
+            cat_counts = r_bugs["Классификация"].value_counts().head(3) if "Классификация" in r_bugs.columns else pd.Series(dtype=int)
+            cat_html = ""
+            for cat_name, cnt in cat_counts.items():
+                cat_html += f"""
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px;">
+                  <span style="color:#e6edf3;">{cat_name}</span>
+                  <span style="color:#9da7b3;">{cnt}</span>
+                </div>"""
+
+            date_str = rel["date"].strftime("%d.%m.%Y") if rel["date"] else ""
+            display_label = rel["display"]
+
+            with col:
+                st.markdown(f"""
+                <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;overflow:hidden;margin-bottom:16px;">
+                  <div style="background:{bg};padding:12px 16px;display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                      <div style="font-size:11px;color:{sub_c};margin-bottom:2px;">Версия</div>
+                      <div style="font-size:15px;font-weight:500;color:{title_c};">{display_label}</div>
+                    </div>
+                    {"<div style='text-align:right;'><div style='font-size:11px;color:" + sub_c + ";margin-bottom:2px;'>Дата</div><div style='font-size:13px;font-weight:500;color:" + title_c + ";'>" + date_str + "</div></div>" if date_str else ""}
+                  </div>
+                  <div style="padding:12px 16px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+                      <div style="background:#21262d;border-radius:8px;padding:8px 10px;text-align:center;">
+                        <div style="font-size:11px;color:#9da7b3;">Всего багов</div>
+                        <div style="font-size:22px;font-weight:500;color:#e6edf3;">{total_bugs}</div>
+                      </div>
+                      <div style="background:#21262d;border-radius:8px;padding:8px 10px;text-align:center;">
+                        <div style="font-size:11px;color:#9da7b3;">Обращений</div>
+                        <div style="font-size:22px;font-weight:500;color:#e6edf3;">{total_appeals}</div>
+                      </div>
+                    </div>
+                    <div style="font-size:12px;color:#9da7b3;margin-bottom:6px;">По приоритетам</div>
+                    {pri_html}
+                    <div style="font-size:12px;color:#9da7b3;margin:10px 0 6px;">По бизнес-линиям</div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">{bl_html}</div>
+                    <div style="font-size:12px;color:#9da7b3;margin-bottom:6px;">Топ категорий</div>
+                    {cat_html}
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+# ── ДЕТАЛИЗАЦИЯ ─────────────────────────────────────────────────────────────
+with st.expander("Детализация дефектов"):
+    show_cols = [
+        "Код", "Тема", "Статус", "Приоритет", "Исполнитель",
+        DATE_CREATED_COL, DATE_RESOLUTION_COL, "Возраст бага, дней",
+        "Бизнес-линия", "Классификация", "JustAI", VERSION_COL, "Метки",
+    ]
+    show_cols = [c for c in show_cols if c in filtered.columns]
+    st.dataframe(filtered[show_cols], use_container_width=True, hide_index=True)

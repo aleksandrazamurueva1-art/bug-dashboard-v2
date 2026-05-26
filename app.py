@@ -1066,6 +1066,13 @@ else:
         # Сортируем: сначала с датой по возрастанию, потом без даты
         releases.sort(key=lambda r: (r["date"] is None, r["date"] or pd.Timestamp.max))
 
+        # Оставляем только релизы не старше 3 недель (или без даты)
+        _three_weeks_ago = pd.Timestamp.today().normalize() - pd.Timedelta(weeks=3)
+        releases = [
+            r for r in releases
+            if r["date"] is None or r["date"] >= _three_weeks_ago
+        ]
+
         # Цвета шапок карточек
         header_colors = [
             ("#0c447c", "#85b7eb", "#e6f1fb"),

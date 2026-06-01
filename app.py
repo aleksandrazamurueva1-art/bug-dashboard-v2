@@ -954,67 +954,76 @@ else:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # Динамика открытия и закрытия багов с обращениями
-        id1, id2 = st.columns(2)
+        # Динамика обращений — один линейный график (открытые vs закрытые)
+        import plotly.graph_objects as _go
 
-        with id1:
-            st.subheader("Динамика открытия (с обращениями)")
-            if DATE_CREATED_COL in impact_df.columns and impact_df[DATE_CREATED_COL].notna().any():
-                open_dyn = (
-                    impact_df.dropna(subset=[DATE_CREATED_COL])
-                    .assign(week=lambda x: x[DATE_CREATED_COL].dt.to_period("W").dt.start_time)
-                    .groupby("week").agg(
-                        Багов=("Код", "count"),
-                        Обращений=(APPEALS_COL, "sum")
-                    )
-                    .reset_index()
-                )
-                fig = px.bar(
-                    open_dyn, x="week", y="Обращений",
-                    text="Обращений",
-                    color_discrete_sequence=["#f85149"],
-                    hover_data={"Багов": True},
-                )
-                fig.update_traces(textposition="outside")
-                fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=None, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Нет данных по дате создания.")
+        st.subheader("Динамика обращений: открытые vs закрытые")
 
-        with id2:
-            st.subheader("Динамика закрытия (с обращениями)")
-            # Берём все закрытые баги с обращениями из полного df
-            impact_all = df.copy()
-            impact_all[APPEALS_COL] = (
-                impact_all[APPEALS_COL].astype(str).str.strip()
-                .str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
-                .pipe(pd.to_numeric, errors="coerce").fillna(0).astype(int)
+        # Открытые с обращениями
+        if DATE_CREATED_COL in impact_df.columns and impact_df[DATE_CREATED_COL].notna().any():
+            open_dyn = (
+                impact_df.dropna(subset=[DATE_CREATED_COL])
+                .assign(period=lambda x: x[DATE_CREATED_COL].dt.to_period("M").dt.start_time)
+                .groupby("period")[APPEALS_COL].sum()
+                .reset_index(name="Открытые")
             )
-            impact_closed = impact_all[
-                (impact_all[APPEALS_COL] > 0)
-                & (impact_all["Статус"].astype(str).isin(CLOSED_STATUSES))
-            ]
-            if DATE_RESOLUTION_COL in impact_closed.columns and impact_closed[DATE_RESOLUTION_COL].notna().any():
-                close_dyn = (
-                    impact_closed.dropna(subset=[DATE_RESOLUTION_COL])
-                    .assign(week=lambda x: x[DATE_RESOLUTION_COL].dt.to_period("W").dt.start_time)
-                    .groupby("week").agg(
-                        Багов=("Код", "count"),
-                        Обращений=(APPEALS_COL, "sum")
-                    )
-                    .reset_index()
-                )
-                fig = px.bar(
-                    close_dyn, x="week", y="Обращений",
-                    text="Обращений",
-                    color_discrete_sequence=["#238636"],
-                    hover_data={"Багов": True},
-                )
-                fig.update_traces(textposition="outside")
-                fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=None, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Нет закрытых багов с обращениями.")
+        else:
+            open_dyn = pd.DataFrame(columns=["period", "Открытые"])
+
+        # Закрытые с обращениями
+        impact_all = df_for_dynamics.copy()
+        impact_all[APPEALS_COL] = (
+            impact_all[APPEALS_COL].astype(str).str.strip()
+            .str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
+            .pipe(pd.to_numeric, errors="coerce").fillna(0).astype(int)
+        )
+        impact_closed = impact_all[
+            (impact_all[APPEALS_COL] > 0)
+            & (impact_all["Статус"].astype(str).isin(CLOSED_STATUSES))
+        ]
+        if DATE_RESOLUTION_COL in impact_closed.columns and impact_closed[DATE_RESOLUTION_COL].notna().any():
+            close_dyn = (
+                impact_closed.dropna(subset=[DATE_RESOLUTION_COL])
+                .assign(period=lambda x: x[DATE_RESOLUTION_COL].dt.to_period("M").dt.start_time)
+                .groupby("period")[APPEALS_COL].sum()
+                .reset_index(name="Закрытые")
+            )
+        else:
+            close_dyn = pd.DataFrame(columns=["period", "Закрытые"])
+
+        merged_appeals = pd.merge(open_dyn, close_dyn, on="period", how="outer").sort_values("period").fillna(0)
+
+        if not merged_appeals.empty:
+            fig = _go.Figure()
+            fig.add_trace(_go.Scatter(
+                x=pd.concat([merged_appeals["period"], merged_appeals["period"][::-1]]),
+                y=pd.concat([merged_appeals["Открытые"], merged_appeals["Закрытые"][::-1]]),
+                fill="toself", fillcolor="rgba(248,81,73,0.08)",
+                line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip", showlegend=False,
+            ))
+            fig.add_trace(_go.Scatter(
+                x=merged_appeals["period"], y=merged_appeals["Открытые"],
+                mode="lines+markers", name="Открытые",
+                line=dict(color="#f85149", width=2), marker=dict(size=6),
+                hovertemplate="%{x|%b %Y}<br>Обращений открытых: <b>%{y}</b><extra></extra>",
+            ))
+            fig.add_trace(_go.Scatter(
+                x=merged_appeals["period"], y=merged_appeals["Закрытые"],
+                mode="lines+markers", name="Закрытые",
+                line=dict(color="#3fb950", width=2), marker=dict(size=6),
+                hovertemplate="%{x|%b %Y}<br>Обращений закрытых: <b>%{y}</b><extra></extra>",
+            ))
+            fig.update_layout(
+                height=380, margin=dict(l=10, r=10, t=30, b=10),
+                xaxis_title=None, yaxis_title="Обращений",
+                legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
+                hovermode="x unified",
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="#21262d"), yaxis=dict(gridcolor="#21262d"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Нет данных для отображения динамики обращений.")
 
         st.subheader("Топ дефектов по количеству обращений")
         top_bugs = impact_df.sort_values(APPEALS_COL, ascending=False).head(20)

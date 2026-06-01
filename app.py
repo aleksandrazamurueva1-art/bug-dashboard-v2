@@ -880,11 +880,17 @@ else:
             if not impact_df.empty else "—"
         )
 
-        im1, im2, im3, im4 = st.columns(4)
+        im1, im2, im3 = st.columns(3)
         im1.metric("Всего обращений", total_appeals)
         im2.metric("Багов с обращениями", bugs_with_appeals)
-        im3.metric("Топ категория", top_cat_appeals)
-        im4.metric("Среднее на баг", f"{avg_appeals:.1f}")
+        with im3:
+            st.markdown(
+                f"""<div style="background:#1e2129;border-radius:10px;padding:14px 18px;">
+                <div style="font-size:13px;color:#aaa;margin-bottom:6px;">Топ категория</div>
+                <div style="font-size:17px;font-weight:700;color:#fff;word-break:break-word;line-height:1.3;">{top_cat_appeals}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
         ic1, ic2 = st.columns(2)
 
